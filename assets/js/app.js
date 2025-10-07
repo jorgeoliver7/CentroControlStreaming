@@ -1,0 +1,858 @@
+// Centro de Control de Streaming - App JS extraído
+const KEY = 'ccs_data_v1';
+const stateDefault = { quickLinks:[], folders:[], lists:[], history:[], prefs:{} };
+
+function ensurePrefs(obj){
+  const base = {
+    reco:{min:0,exclude:false,tag:'',tags:[],tagMode:'any',text:''},
+    library:{min:0,exclude:false,tag:'',tags:[],tagMode:'any',text:''},
+    lists:{min:0,exclude:false,tag:'',tags:[],tagMode:'any',text:''}
+  };
+  obj.prefs = Object.assign({}, base, obj.prefs||{});
+  obj.prefs.reco = Object.assign({}, base.reco, obj.prefs.reco||{});
+  obj.prefs.library = Object.assign({}, base.library, obj.prefs.library||{});
+  obj.prefs.lists = Object.assign({}, base.lists, obj.prefs.lists||{});
+  return obj;
+}
+function loadState(){
+  try{
+    const s = localStorage.getItem(KEY);
+    const obj = s? JSON.parse(s) : structuredClone(stateDefault);
+    return ensurePrefs(obj);
+  }catch(e){console.error(e);return ensurePrefs(structuredClone(stateDefault))}
+}
+function saveState(s){localStorage.setItem(KEY,JSON.stringify(s));updateStorageUsage();}
+function uid(prefix='id'){return prefix+Math.random().toString(36).slice(2,9)}
+
+const defaultQuick = [
+  {id:uid('q'),name:'Netflix',url:'https://www.netflix.com'},
+  {id:uid('q'),name:'YouTube',url:'https://www.youtube.com'},
+  {id:uid('q'),name:'Prime Video',url:'https://www.primevideo.com'},
+  {id:uid('q'),name:'Disney+',url:'https://www.disneyplus.com'},
+  {id:uid('q'),name:'HBO Max',url:'https://www.hbomax.com'},
+  {id:uid('q'),name:'Crunchyroll',url:'https://www.crunchyroll.com'}
+];
+
+function computeTopTags(history){
+  const counts = {};
+  history.forEach(h=>{(h.tags||[]).forEach(t=>counts[t]= (counts[t]||0)+1)});
+  return Object.entries(counts).sort((a,b)=>b[1]-a[1]).map(x=>x[0]);
+}
+function scoreItem(item,state){
+  const topTags = computeTopTags(state.history).slice(0,5);
+  const tagScore = (item.tags||[]).reduce((s,t)=> s + (topTags.includes(t)?1:0),0);
+  const ratingScore = (item.rating||0);
+  const watched = state.history.find(h=>h.url===item.url);
+  const watchedPenalty = watched? -1 : 0;
+  return tagScore*2 + ratingScore + watchedPenalty;
+}
+function recommendFromAll(state,limit=6){
+  const pool = [];
+  state.folders.forEach(f=>{(f.items||[]).forEach(it=>pool.push(it))});
+  state.lists.forEach(L=>{(L.items||[]).forEach(it=>pool.push(it))});
+  const map = {};
+  pool.forEach(it=>{map[it.url]=map[it.url]||it});
+  const unique = Object.values(map);
+  unique.forEach(it=>it.__score = scoreItem(it,state));
+  return unique.sort((a,b)=>b.__score - a.__score).slice(0,limit);
+}
+
+const state = loadState();
+if(state.quickLinks.length===0){state.quickLinks = defaultQuick; saveState(state)}
+
+const el = {
+  quickLinks:document.getElementById('quickLinks'),
+  folders:document.getElementById('folders'),
+  lists:document.getElementById('lists'),
+  history:document.getElementById('history'),
+  recos:document.getElementById('recommendations'),
+  storageUsage:document.getElementById('storageUsage'),
+  searchCard:document.getElementById('searchCard'),
+  searchTitle:document.getElementById('searchTitle'),
+  searchResults:document.getElementById('searchResults'),
+  modalOverlay:document.getElementById('modalOverlay'),
+  modalTitle:document.getElementById('modalTitle'),
+  modalBody:document.getElementById('modalBody'),
+  modalSubmit:document.getElementById('modalSubmit'),
+  modalCancel:document.getElementById('modalCancel'),
+  recoMinRating:document.getElementById('recoMinRating'),
+  recoExcludeWatched:document.getElementById('recoExcludeWatched'),
+  recoTag:document.getElementById('recoTag'),
+  recoTagMode:document.getElementById('recoTagMode'),
+  recoTagChips:document.getElementById('recoTagChips'),
+  recoTextFilter:document.getElementById('recoTextFilter'),
+  recoResetFilters:document.getElementById('recoResetFilters'),
+  libMinRating:document.getElementById('libMinRating'),
+  libExcludeWatched:document.getElementById('libExcludeWatched'),
+  libTag:document.getElementById('libTag'),
+  libTagMode:document.getElementById('libTagMode'),
+  libTagChips:document.getElementById('libTagChips'),
+  libTextFilter:document.getElementById('libTextFilter'),
+  libResetFilters:document.getElementById('libResetFilters'),
+  listsMinRating:document.getElementById('listsMinRating'),
+  listsExcludeWatched:document.getElementById('listsExcludeWatched'),
+  listsTag:document.getElementById('listsTag'),
+  listsTagMode:document.getElementById('listsTagMode'),
+  listsTagChips:document.getElementById('listsTagChips'),
+  listsTextFilter:document.getElementById('listsTextFilter'),
+  listsResetFilters:document.getElementById('listsResetFilters')
+}
+
+let quickEditMode=false;
+
+function initPrefsUI(){
+  const p = state.prefs||{};
+  if(el.recoMinRating) el.recoMinRating.value = String((p.reco&&p.reco.min)||0);
+  if(el.recoExcludeWatched) el.recoExcludeWatched.checked = !!(p.reco&&p.reco.exclude);
+  if(el.recoTag) el.recoTag.value = (p.reco&&p.reco.tag)||'';
+  if(el.recoTextFilter) el.recoTextFilter.value = (p.reco&&p.reco.text)||'';
+  if(el.recoTagMode) el.recoTagMode.value = (p.reco&&p.reco.tagMode)||'any';
+  renderTagChips('reco');
+  if(el.libMinRating) el.libMinRating.value = String((p.library&&p.library.min)||0);
+  if(el.libExcludeWatched) el.libExcludeWatched.checked = !!(p.library&&p.library.exclude);
+  if(el.libTag) el.libTag.value = (p.library&&p.library.tag)||'';
+  if(el.libTextFilter) el.libTextFilter.value = (p.library&&p.library.text)||'';
+  if(el.libTagMode) el.libTagMode.value = (p.library&&p.library.tagMode)||'any';
+  renderTagChips('library');
+  if(el.listsMinRating) el.listsMinRating.value = String((p.lists&&p.lists.min)||0);
+  if(el.listsExcludeWatched) el.listsExcludeWatched.checked = !!(p.lists&&p.lists.exclude);
+  if(el.listsTag) el.listsTag.value = (p.lists&&p.lists.tag)||'';
+  if(el.listsTextFilter) el.listsTextFilter.value = (p.lists&&p.lists.text)||'';
+  if(el.listsTagMode) el.listsTagMode.value = (p.lists&&p.lists.tagMode)||'any';
+  renderTagChips('lists');
+}
+initPrefsUI();
+
+function getSectionRefs(section){
+  if(section==='reco') return {input:el.recoTag, mode:el.recoTagMode, chips:el.recoTagChips, text:el.recoTextFilter, exclude:el.recoExcludeWatched, prefs:()=>state.prefs.reco};
+  if(section==='library') return {input:el.libTag, mode:el.libTagMode, chips:el.libTagChips, text:el.libTextFilter, exclude:el.libExcludeWatched, prefs:()=>state.prefs.library};
+  if(section==='lists') return {input:el.listsTag, mode:el.listsTagMode, chips:el.listsTagChips, text:el.listsTextFilter, exclude:el.listsExcludeWatched, prefs:()=>state.prefs.lists};
+  return {input:null, mode:null, chips:null, text:null, exclude:null, prefs:()=>({})};
+}
+function renderTagChips(section){
+  const {chips, prefs} = getSectionRefs(section);
+  if(!chips) return;
+  const ps = prefs(); const tags = (ps.tags||[]);
+  chips.innerHTML = '';
+  tags.forEach(tag=>{
+    const chip = document.createElement('span'); chip.className='chip'; chip.textContent=tag;
+    const rm = document.createElement('span'); rm.textContent=' ×'; rm.style.marginLeft='4px'; rm.style.cursor='pointer';
+    rm.onclick = ()=>{ ps.tags = (ps.tags||[]).filter(t=>t!==tag); saveState(state); renderTagChips(section); renderAll(); };
+    chip.appendChild(rm); chips.appendChild(chip);
+  });
+  renderFilterChips(section);
+  renderTagSuggestions(section, '');
+}
+function renderFilterChips(section){
+  const {chips, text, exclude, prefs} = getSectionRefs(section);
+  if(!chips) return;
+  const ps = prefs();
+  const curText = String(ps.text||'').trim();
+  if(curText){
+    const chip = document.createElement('span'); chip.className='chip';
+    chip.innerHTML = `texto: \"${escapeHTML(curText)}\" <button aria-label='Eliminar'>&times;</button>`;
+    chip.querySelector('button').onclick = ()=>{ if(text) text.value=''; ps.text=''; saveState(state); renderTagChips(section); renderAll(); };
+    chips.appendChild(chip);
+  }
+  if(ps.exclude){
+    const chip = document.createElement('span'); chip.className='chip';
+    chip.innerHTML = `Excluir vistos <button aria-label='Desactivar'>&times;</button>`;
+    chip.querySelector('button').onclick = ()=>{ if(exclude) exclude.checked=false; ps.exclude=false; saveState(state); renderTagChips(section); renderAll(); };
+    chips.appendChild(chip);
+  }
+  const hasAny = (ps.tags||[]).length>0 || !!curText || !!ps.exclude;
+  if(hasAny){
+    const chip = document.createElement('span'); chip.className='chip';
+    chip.innerHTML = `Limpiar todo <button aria-label='Limpiar'>&times;</button>`;
+    chip.querySelector('button').onclick = ()=>{ resetSectionFilters(section); };
+    chips.appendChild(chip);
+  }
+}
+function getTagPopularity(){
+  const counts = new Map();
+  const bump = (t)=>{ if(!t) return; counts.set(t, (counts.get(t)||0)+1); };
+  state.folders.forEach(f=>{ (f.items||[]).forEach(it=>{ (it.tags||[]).forEach(bump); }) });
+  state.lists.forEach(L=>{ (L.items||[]).forEach(it=>{ (it.tags||[]).forEach(bump); }) });
+  state.history.forEach(h=>{ (h.tags||[]).forEach(bump); });
+  return counts;
+}
+function ensureSuggestContainer(section){
+  const {chips} = getSectionRefs(section);
+  if(!chips) return null;
+  const id = `${section}TagSuggest`;
+  let elSug = document.getElementById(id);
+  if(!elSug){
+    elSug = document.createElement('div');
+    elSug.id = id;
+    elSug.className = 'chips';
+    elSug.style.marginTop = '6px';
+    elSug.style.opacity = '0.9';
+    chips.parentNode.insertBefore(elSug, chips.nextSibling);
+  }
+  return elSug;
+}
+function renderTagSuggestions(section, prefix){
+  const container = ensureSuggestContainer(section);
+  if(!container) return;
+  const ps = getSectionRefs(section).prefs();
+  const selected = new Set(ps.tags||[]);
+  const all = getAllTags();
+  const p = String(prefix||'').trim().toLowerCase();
+  let list = all.filter(t=>!selected.has(t) && (!p || t.toLowerCase().includes(p)));
+  const pop = getTagPopularity();
+  list = list.sort((a,b)=> (pop.get(b)||0)-(pop.get(a)||0) || a.localeCompare(b)).slice(0,10);
+  container.innerHTML='';
+  if(list.length===0){ return; }
+  list.forEach(t=>{
+    const chip = document.createElement('span'); chip.className='chip'; chip.textContent=t; chip.style.cursor='pointer';
+    chip.onclick = ()=>{ addTagToSection(section, t); renderTagSuggestions(section, ''); };
+    container.appendChild(chip);
+  });
+}
+function addTagToSection(section, raw){
+  const t = String(raw||'').trim(); if(!t) return;
+  const ps = getSectionRefs(section).prefs();
+  const set = new Set(ps.tags||[]); set.add(t);
+  ps.tags = Array.from(set);
+  saveState(state); renderTagChips(section); renderTagSuggestions(section, ''); renderAll();
+}
+function resetSectionFilters(section){
+  const {input, mode, chips, text, exclude, prefs} = getSectionRefs(section);
+  const ps = prefs();
+  ps.tags = [];
+  ps.tag = '';
+  ps.text = '';
+  ps.tagMode = 'any';
+  ps.exclude = false;
+  if(input) input.value='';
+  if(text) text.value='';
+  if(mode) mode.value='any';
+  if(exclude) exclude.checked=false;
+  if(chips) chips.innerHTML='';
+  saveState(state);
+  renderTagChips(section);
+  renderAll();
+}
+function setupTagControls(section){
+  const {input, mode} = getSectionRefs(section);
+  const suggestState = {idx:-1};
+  if(input){
+    input.addEventListener('keydown', (e)=>{
+      const container = ensureSuggestContainer(section);
+      const chips = container? Array.from(container.querySelectorAll('.chip')) : [];
+      const hasSugs = chips.length>0;
+      if(e.key==='ArrowDown' && hasSugs){ e.preventDefault(); suggestState.idx = (suggestState.idx+1)%chips.length; chips.forEach((c,i)=>{ c.style.outline = i===suggestState.idx? '2px solid var(--muted)' : 'none'; }); return; }
+      if(e.key==='ArrowUp' && hasSugs){ e.preventDefault(); suggestState.idx = (suggestState.idx-1+chips.length)%chips.length; chips.forEach((c,i)=>{ c.style.outline = i===suggestState.idx? '2px solid var(--muted)' : 'none'; }); return; }
+      if(e.key==='Enter' || e.key===','){
+        e.preventDefault();
+        if(hasSugs && suggestState.idx>=0){ const t = chips[suggestState.idx].textContent||''; addTagToSection(section, t); input.value=''; suggestState.idx=-1; chips.forEach(c=>{ c.style.outline='none'; }); }
+        else { addTagToSection(section, input.value); input.value=''; }
+        return;
+      }
+      if(e.key==='Backspace' && !input.value){
+        const ps = getSectionRefs(section).prefs(); const arr = Array.from(ps.tags||[]);
+        if(arr.length>0){ arr.pop(); ps.tags=arr; saveState(state); renderTagChips(section); renderTagSuggestions(section, ''); renderAll(); }
+      }
+    });
+    input.addEventListener('input', (e)=>{ renderTagSuggestions(section, e.target.value); suggestState.idx=-1; const container = ensureSuggestContainer(section); if(container){ Array.from(container.querySelectorAll('.chip')).forEach(c=>{ c.style.outline='none'; }); } });
+  }
+  if(mode){
+    mode.title = 'Cualquiera: coincide si el item tiene alguna etiqueta seleccionada. Todas: requiere todas las etiquetas seleccionadas.';
+    mode.addEventListener('change', ()=>{
+      const ps = getSectionRefs(section).prefs(); ps.tagMode = mode.value||'any';
+      saveState(state); renderAll();
+    });
+  }
+}
+setupTagControls('reco');
+setupTagControls('library');
+setupTagControls('lists');
+
+;['recoMinRating','recoExcludeWatched','recoTag','recoTextFilter'].forEach(id=>{
+  const elx = el[id]; if(!elx) return;
+  elx.addEventListener((id==='recoTag' || id==='recoTextFilter')?'input':'change', ()=>{
+    state.prefs.reco = {
+      min: Number(el.recoMinRating ? el.recoMinRating.value : 0),
+      exclude: !!(el.recoExcludeWatched && el.recoExcludeWatched.checked),
+      tag: (el.recoTag ? el.recoTag.value : '').trim(),
+      text: (el.recoTextFilter ? el.recoTextFilter.value : '').trim()
+    };
+    saveState(state); renderAll();
+  });
+});
+if(el.recoResetFilters){
+  el.recoResetFilters.addEventListener('click', ()=>{
+    if(el.recoMinRating) el.recoMinRating.value = '0';
+    if(el.recoExcludeWatched) el.recoExcludeWatched.checked = false;
+    if(el.recoTag) el.recoTag.value = '';
+    if(el.recoTagMode) el.recoTagMode.value = 'any';
+    if(el.recoTagChips) el.recoTagChips.innerHTML='';
+    if(el.recoTextFilter) el.recoTextFilter.value = '';
+    state.prefs.reco = {min:0,exclude:false,tag:'',tags:[],tagMode:'any',text:''};
+    saveState(state); renderAll();
+  });
+}
+;['libMinRating','libExcludeWatched','libTag','libTextFilter'].forEach(id=>{
+  const elx = el[id]; if(!elx) return;
+  elx.addEventListener((id==='libTag' || id==='libTextFilter')?'input':'change', ()=>{
+    state.prefs.library = {
+      min: Number(el.libMinRating ? el.libMinRating.value : 0),
+      exclude: !!(el.libExcludeWatched && el.libExcludeWatched.checked),
+      tag: (el.libTag ? el.libTag.value : '').trim(),
+      text: (el.libTextFilter ? el.libTextFilter.value : '').trim()
+    };
+    saveState(state); renderAll();
+  });
+});
+;['listsMinRating','listsExcludeWatched','listsTag','listsTextFilter'].forEach(id=>{
+  const elx = el[id]; if(!elx) return;
+  elx.addEventListener((id==='listsTag' || id==='listsTextFilter')?'input':'change', ()=>{
+    state.prefs.lists = {
+      min: Number(el.listsMinRating ? el.listsMinRating.value : 0),
+      exclude: !!(el.listsExcludeWatched && el.listsExcludeWatched.checked),
+      tag: (el.listsTag ? el.listsTag.value : '').trim(),
+      text: (el.listsTextFilter ? el.listsTextFilter.value : '').trim()
+    };
+    saveState(state); renderAll();
+  });
+});
+
+if(el.libResetFilters){
+  el.libResetFilters.addEventListener('click', ()=>{
+    if(el.libMinRating) el.libMinRating.value = '0';
+    if(el.libExcludeWatched) el.libExcludeWatched.checked = false;
+    if(el.libTag) el.libTag.value = '';
+    if(el.libTagMode) el.libTagMode.value = 'any';
+    if(el.libTagChips) el.libTagChips.innerHTML='';
+    if(el.libTextFilter) el.libTextFilter.value = '';
+    state.prefs.library = {min:0,exclude:false,tag:'',tags:[],tagMode:'any',text:''};
+    saveState(state); renderAll();
+  });
+}
+if(el.listsResetFilters){
+  el.listsResetFilters.addEventListener('click', ()=>{
+    if(el.listsMinRating) el.listsMinRating.value = '0';
+    if(el.listsExcludeWatched) el.listsExcludeWatched.checked = false;
+    if(el.listsTag) el.listsTag.value = '';
+    if(el.listsTagMode) el.listsTagMode.value = 'any';
+    if(el.listsTagChips) el.listsTagChips.innerHTML='';
+    if(el.listsTextFilter) el.listsTextFilter.value = '';
+    state.prefs.lists = {min:0,exclude:false,tag:'',tags:[],tagMode:'any',text:''};
+    saveState(state); renderAll();
+  });
+}
+
+function renderQuick(){
+  el.quickLinks.innerHTML='';
+  state.quickLinks.forEach(q=>{
+    const b=document.createElement('div');b.className='link-btn';
+    b.innerHTML = `<img src="https://www.google.com/s2/favicons?domain=${q.url}" alt="" width="16" height="16"><span>${escapeHTML(q.name)}</span>`;
+    b.onclick = ()=>safeOpen(q.url);
+    b.ondblclick = ()=>{
+      openModal({
+        title:'Editar enlace rápido',
+        fields:[{name:'name',label:'Nombre',type:'text',value:q.name},{name:'url',label:'URL',type:'url',value:q.url}],
+        submitText:'Guardar',
+        onSubmit:(data)=>{
+          if(!data.name||!data.url) return alert('Nombre y URL son obligatorios');
+          q.name=data.name; q.url=data.url; saveState(state); renderAll();
+        }
+      });
+    };
+    b.oncontextmenu = (e)=>{e.preventDefault();if(confirm('Eliminar enlace rápido?')){state.quickLinks = state.quickLinks.filter(x=>x.id!==q.id);saveState(state);renderAll()}};
+    if(quickEditMode){
+      const editBtn=document.createElement('button'); editBtn.className='small-btn'; editBtn.textContent='✎'; editBtn.onclick=(e)=>{ e.stopPropagation(); openModal({ title:'Editar enlace rápido', fields:[{name:'name',label:'Nombre',type:'text',value:q.name},{name:'url',label:'URL',type:'url',value:q.url}], submitText:'Guardar', onSubmit:(data)=>{ if(!data.name||!data.url) return alert('Nombre y URL son obligatorios'); q.name=data.name; q.url=data.url; saveState(state); renderAll(); } }); };
+      const rmBtn=document.createElement('button'); rmBtn.className='small-btn'; rmBtn.textContent='x'; rmBtn.onclick=(e)=>{ e.stopPropagation(); if(confirm('Eliminar enlace rápido?')){ state.quickLinks = state.quickLinks.filter(x=>x.id!==q.id); saveState(state); renderAll(); } };
+      b.appendChild(editBtn); b.appendChild(rmBtn);
+    }
+    el.quickLinks.appendChild(b);
+  })
+}
+
+function renderFolders(){
+  el.folders.innerHTML='';
+  if(state.folders.length===0){ el.folders.innerHTML = '<div class="small muted">No hay carpetas. Crea una para organizar tus marcadores.</div>'; return; }
+  const p = (state.prefs && state.prefs.library) || {min:0,exclude:false,tag:'',tags:[],tagMode:'any',text:''};
+  state.folders.forEach(f=>{
+    const d=document.createElement('div');d.className='folder';
+    const hdr = document.createElement('div'); hdr.style.display='flex'; hdr.style.justifyContent='space-between'; hdr.style.alignItems='center';
+    const allItems = (f.items||[]);
+    const text = String(p.text||'').trim().toLowerCase();
+    const tags = (p.tags||[]).map(t=>t.toLowerCase());
+    const tagMode = p.tagMode||'any';
+    const singleTag = String(p.tag||'').trim().toLowerCase();
+    const filtered = allItems.filter(it=>{
+      const ratingOk = (it.rating||0) >= (p.min||0);
+      const excludeWatchedOk = !(p.exclude && state.history.find(h=>h.url===it.url));
+      const itemTags = (it.tags||[]).map(t=>t.toLowerCase());
+      let tagOk = true;
+      if(tags.length>0){
+        tagOk = tagMode==='all' ? tags.every(t=>itemTags.includes(t)) : tags.some(t=>itemTags.includes(t));
+      } else if(singleTag){
+        tagOk = itemTags.includes(singleTag) || itemTags.some(t=>t.includes(singleTag));
+      }
+      const blob = `${(it.title||it.name||'')}`+` ${it.url||''}`+` ${(it.tags||[]).join(' ')}`;
+      const textOk = !text || blob.toLowerCase().includes(text);
+      return ratingOk && excludeWatchedOk && tagOk && textOk;
+    });
+    const watchedCount = allItems.filter(it=> state.history.find(h=>h.url===it.url)).length;
+    hdr.innerHTML = `<h3>${escapeHTML(f.name)}</h3><div class='small muted'>${filtered.length} / ${allItems.length} items · vistos: ${watchedCount}</div>`;
+    d.appendChild(hdr);
+    const list=document.createElement('div'); list.style.marginTop='8px';
+    filtered.forEach(it=>{
+      const row=document.createElement('div');row.className='bookmark';
+      row.innerHTML = `<div><a href='${safeURL(it.url)}' target='_blank' rel='noopener noreferrer'>${escapeHTML(it.title||it.name||it.url)}</a><div class='meta'>${(it.tags||[]).join(', ')}</div></div><div style='display:flex;gap:8px;align-items:center'><div class='stars' data-url='${encodeURIComponent(it.url)}'>${renderStars(it.rating||0)}</div><button class='small-btn' data-action='mark'>Visto</button><button class='small-btn' data-action='edit'>✎</button><button class='small-btn' data-action='rm'>x</button></div>`;
+      list.appendChild(row);
+      row.querySelector("[data-action='mark']").onclick = ()=>{markWatched(it);} 
+      row.querySelector("[data-action='edit']").onclick = ()=>{editItemInFolder(f.id,it)}
+      row.querySelector("[data-action='rm']").onclick = ()=>{ f.items = (f.items||[]).filter(x=>x.id!==it.id); saveState(state); renderAll(); }
+      row.querySelector('.stars').querySelectorAll('.star').forEach((s,idx)=>{
+        s.onclick = ()=>{setRating(it.url, idx+1);} 
+      })
+    })
+
+    const ctrl = document.createElement('div'); ctrl.style.marginTop='8px'; ctrl.className='controls';
+    const addBtn=document.createElement('button'); addBtn.textContent='+ Añadir marcador'; addBtn.onclick=()=>addBookmarkToFolder(f.id);
+    const delBtn=document.createElement('button'); delBtn.textContent='Eliminar carpeta'; delBtn.onclick=()=>{if(confirm('Eliminar carpeta y sus marcadores?')){state.folders=state.folders.filter(x=>x.id!==f.id);saveState(state);renderAll()}};
+    ctrl.appendChild(addBtn);ctrl.appendChild(delBtn);
+    d.appendChild(list);d.appendChild(ctrl);
+    el.folders.appendChild(d);
+  })
+}
+
+function renderLists(){
+  el.lists.innerHTML='';
+  if(state.lists.length===0){el.lists.innerHTML='<div class="small muted">No hay listas. Crea una para seguir títulos en varios sitios.</div>';return}
+  const p = (state.prefs && state.prefs.lists) || {min:0,exclude:false,tag:'',tags:[],tagMode:'any',text:''};
+  state.lists.forEach(L=>{
+    const d=document.createElement('div');d.className='folder';
+    const allItems = (L.items||[]);
+    const text = String(p.text||'').trim().toLowerCase();
+    const tags = (p.tags||[]).map(t=>t.toLowerCase());
+    const tagMode = p.tagMode||'any';
+    const singleTag = String(p.tag||'').trim().toLowerCase();
+    const filtered = allItems.filter(it=>{
+      const ratingOk = (it.rating||0) >= (p.min||0);
+      const excludeWatchedOk = !(p.exclude && state.history.find(h=>h.url===it.url));
+      const itemTags = (it.tags||[]).map(t=>t.toLowerCase());
+      let tagOk = true;
+      if(tags.length>0){
+        tagOk = tagMode==='all' ? tags.every(t=>itemTags.includes(t)) : tags.some(t=>itemTags.includes(t));
+      } else if(singleTag){
+        tagOk = itemTags.includes(singleTag) || itemTags.some(t=>t.includes(singleTag));
+      }
+      const blob = `${(it.title||it.name||'')}`+` ${it.url||''}`+` ${(it.tags||[]).join(' ')}`;
+      const textOk = !text || blob.toLowerCase().includes(text);
+      return ratingOk && excludeWatchedOk && tagOk && textOk;
+    });
+    const watchedCount = allItems.filter(it=> state.history.find(h=>h.url===it.url)).length;
+    d.innerHTML = `<div style='display:flex;justify-content:space-between;align-items:center'><h3>${escapeHTML(L.name)}</h3><div class='small muted'>${filtered.length} / ${allItems.length} items · vistos: ${watchedCount}</div></div>`;
+    const list=document.createElement('div');list.style.marginTop='8px';
+    filtered.forEach(it=>{
+      const row=document.createElement('div');row.className='item-row';
+      row.innerHTML = `<div><a href='${safeURL(it.url)}' target='_blank' rel='noopener noreferrer'>${escapeHTML(it.title||it.name||it.url)}</a><div class='meta'>${(it.tags||[]).join(', ')}</div></div><div style='display:flex;gap:6px;align-items:center'><div class='stars' data-url='${encodeURIComponent(it.url)}'>${renderStars(it.rating||0)}</div><button class='small-btn' data-action='mark'>Visto</button><button class='small-btn' data-action='edit'>✎</button><button class='small-btn' data-action='rm'>x</button></div>`;
+      list.appendChild(row);
+      row.querySelector("[data-action='mark']").onclick = ()=>markWatched(it);
+      row.querySelector("[data-action='edit']").onclick = ()=>editItemInList(L.id,it);
+      row.querySelector("[data-action='rm']").onclick = ()=>{L.items = L.items.filter(x=>x.url!==it.url); saveState(state); renderAll();}
+      row.querySelector('.stars').querySelectorAll('.star').forEach((s,idx)=>{s.onclick = ()=>{setRating(it.url, idx+1);} })
+    })
+    const ctrl=document.createElement('div');ctrl.style.marginTop='8px'; ctrl.className='controls';
+    const addBtn=document.createElement('button'); addBtn.textContent='+ Añadir enlace'; addBtn.onclick=()=>addToList(L.id);
+    const openBtn=document.createElement('button'); openBtn.textContent='Abrir lista'; openBtn.onclick=()=>openList(L.id);
+    const delBtn=document.createElement('button'); delBtn.textContent='Eliminar'; delBtn.onclick=()=>{if(confirm('Eliminar lista?')){state.lists=state.lists.filter(x=>x.id!==L.id);saveState(state);renderAll()}};
+    ctrl.appendChild(addBtn);ctrl.appendChild(openBtn);ctrl.appendChild(delBtn);
+    d.appendChild(list);d.appendChild(ctrl);
+    el.lists.appendChild(d);
+  })
+}
+
+function renderHistory(){
+  el.history.innerHTML='';
+  if(state.history.length===0){el.history.innerHTML='<div class="small muted">No hay historial. Marca items como vistos para que el motor aprenda.</div>';return}
+  state.history.slice().reverse().forEach(h=>{
+    const d=document.createElement('div');d.className='item-row';
+    d.innerHTML = `<div><a href='${safeURL(h.url)}' target='_blank' rel='noopener noreferrer'>${escapeHTML(h.title||h.url)}</a><div class='meta'>${new Date(h.ts).toLocaleString()} • ${ (h.tags||[]).join(', ') }</div></div><div style='display:flex;gap:6px;align-items:center'><div class='small muted'>${h.rating? '⭐ '+h.rating : ''}</div><button class='small-btn' data-action='edit'>✎</button><button class='small-btn' data-action='rm'>x</button></div>`;
+    d.querySelector("[data-action='edit']").onclick = ()=>editHistoryEntry(h);
+    d.querySelector("[data-action='rm']").onclick = ()=>deleteHistoryEntry(h.id);
+    el.history.appendChild(d);
+  })
+}
+
+function renderRecommendations(){
+  el.recos.innerHTML='';
+  let recs = recommendFromAll(state,50);
+  const min = Number(el.recoMinRating ? el.recoMinRating.value : 0);
+  const exclude = !!(el.recoExcludeWatched && el.recoExcludeWatched.checked);
+  const p = (state.prefs && state.prefs.reco) || {tag:'',tags:[],tagMode:'any',text:''};
+  const tags = (p.tags||[]).map(t=>t.toLowerCase());
+  const tagMode = p.tagMode||'any';
+  const singleTag = String(p.tag||'').trim().toLowerCase();
+  const text = (el.recoTextFilter ? el.recoTextFilter.value : '').trim().toLowerCase();
+  recs = recs.filter(r=>{
+    const okRating = (r.rating||0) >= min;
+    const okExclude = !exclude || !state.history.find(h=>h.url===r.url);
+    const itemTags = (r.tags||[]).map(t=>t.toLowerCase());
+    let okTag = true;
+    if(tags.length>0){ okTag = tagMode==='all' ? tags.every(t=>itemTags.includes(t)) : tags.some(t=>itemTags.includes(t)); }
+    else if(singleTag){ okTag = itemTags.includes(singleTag) || itemTags.some(t=>t.includes(singleTag)); }
+    const blob = `${(r.title||r.name||'')}`+` ${r.url||''}`+` ${(r.tags||[]).join(' ')}`;
+    const okText = !text || blob.toLowerCase().includes(text);
+    return okRating && okExclude && okTag && okText;
+  }).slice(0,8);
+  if(recs.length===0){el.recos.innerHTML='<div class="small muted">No hay recomendaciones con los filtros actuales.</div>';return}
+  recs.forEach(r=>{
+    const d=document.createElement('div');d.className='item-row';
+    d.innerHTML = `<div><a href='${safeURL(r.url)}' target='_blank' rel='noopener noreferrer'>${escapeHTML(r.title||r.name||r.url)}</a><div class='meta'>${(r.tags||[]).join(', ')} • score:${r.__score.toFixed(1)}</div></div><div style='display:flex;gap:6px'><button class='small-btn' data-action='add'>+ Lista</button><button class='small-btn' data-action='mark'>Visto</button></div>`;
+    el.recos.appendChild(d);
+    d.querySelector("[data-action='mark']").onclick = ()=>{markWatched(r)}
+    d.querySelector("[data-action='add']").onclick = ()=>{quickAddToList(r)}
+  })
+}
+
+function renderAll(){ renderQuick(); renderFolders(); renderLists(); renderHistory(); renderRecommendations(); }
+renderAll(); updateStorageUsage();
+
+document.getElementById('addQuick').onclick = ()=>{
+  openModal({
+    title:'Añadir enlace rápido',
+    fields:[{name:'name',label:'Nombre',type:'text',value:''},{name:'url',label:'URL',type:'url',value:''}],
+    submitText:'Guardar',
+    onSubmit:(data)=>{
+      if(!data.name||!data.url) return alert('Nombre y URL son obligatorios');
+      if(existsQuick(data.url)) return alert('Ya existe un enlace rápido con esa URL');
+      state.quickLinks.push({id:uid('q'),name:data.name,url:data.url}); saveState(state); renderAll();
+    }
+  });
+}
+document.getElementById('toggleQuickEdit').onclick = ()=>{
+  quickEditMode = !quickEditMode; renderQuick();
+  document.getElementById('toggleQuickEdit').textContent = quickEditMode? 'Editar enlaces: ON' : 'Editar enlaces';
+}
+document.getElementById('addFolder').onclick = ()=>{
+  openModal({
+    title:'Nueva carpeta',
+    fields:[{name:'name',label:'Nombre de la carpeta',type:'text',value:''}],
+    submitText:'Crear',
+    onSubmit:(data)=>{ if(!data.name) return alert('Nombre obligatorio'); state.folders.push({id:uid('f'),name:data.name,items:[]}); saveState(state); renderAll(); }
+  });
+}
+
+function addBookmarkToFolder(folderId){
+  const f = state.folders.find(x=>x.id===folderId);
+  openModal({
+    title:`Añadir marcador a "${f?.name||''}"`,
+    fields:[{name:'title',label:'Título',type:'text',value:''},{name:'url',label:'URL',type:'url',value:''},{name:'tags',label:'Etiquetas',type:'tags',value:[]}],
+    submitText:'Añadir',
+    onSubmit:(data)=>{
+      if(!data.title||!data.url) return alert('Título y URL son obligatorios');
+      if(existsInFolder(folderId, data.url)) return alert('Ya existe un marcador con esa URL en la carpeta');
+      f.items = f.items||[];
+      f.items.push({id:uid('b'),title:data.title,url:data.url,tags:(data.tags||[])});
+      saveState(state); renderAll();
+    }
+  });
+}
+
+function addToList(listId){
+  const L = state.lists.find(x=>x.id===listId);
+  openModal({
+    title:`Añadir a lista "${L?.name||''}"`,
+    fields:[{name:'title',label:'Título',type:'text',value:''},{name:'url',label:'URL',type:'url',value:''},{name:'tags',label:'Etiquetas',type:'tags',value:[]}],
+    submitText:'Añadir',
+    onSubmit:(data)=>{
+      if(!data.title||!data.url) return alert('Título y URL son obligatorios');
+      if(existsInList(listId, data.url)) return alert('La URL ya existe en esta lista');
+      L.items = L.items||[];
+      L.items.push({id:uid('li'),title:data.title,url:data.url,tags:(data.tags||[])});
+      saveState(state); renderAll();
+    }
+  });
+}
+
+document.getElementById('newListBtn').onclick = ()=>{
+  openModal({
+    title:'Nueva lista',
+    fields:[{name:'name',label:'Nombre de la lista',type:'text',value:''}],
+    submitText:'Crear',
+    onSubmit:(data)=>{ if(!data.name) return alert('Nombre obligatorio'); state.lists.push({id:uid('L'),name:data.name,items:[]}); saveState(state); renderAll(); }
+  });
+}
+
+document.getElementById('openAllBtn').onclick = ()=>{
+  const name = prompt('Abrir todas las URLs de cuál lista? escribe nombre o deja vacío para cancelar'); if(!name) return;
+  const L = state.lists.find(x=>x.name.toLowerCase()===name.toLowerCase()); if(!L){alert('Lista no encontrada'); return}
+  const count = (L.items||[]).length;
+  if(count>5){
+    if(!confirm(`Se abrirán ${count} pestañas. ¿Confirmas?`)) return;
+  }
+  L.items.forEach(it=>safeOpen(it.url));
+}
+
+function markWatched(item){
+  openModal({
+    title:'Marcar como visto',
+    fields:[
+      {name:'tags',label:'Etiquetas',type:'tags',value:(item.tags||[])},
+      {name:'rating',label:'Valoración (1-5)',type:'number',value:(item.rating||'')}
+    ],
+    submitText:'Guardar',
+    onSubmit:(data)=>{
+      const ratingVal = data.rating? Number(data.rating): undefined;
+      if(ratingVal && (ratingVal<1 || ratingVal>5)) return alert('La valoración debe ser entre 1 y 5');
+      const entry = {id:uid('h'),url:item.url,title:item.title||item.name||item.url,tags:(data.tags||[]),rating: ratingVal,ts:Date.now()};
+      state.history.push(entry);
+      saveState(state); renderAll();
+    }
+  });
+}
+
+function setRating(url, rating){
+  let found=false;
+  state.folders.forEach(f=>{(f.items||[]).forEach(it=>{if(it.url===url){it.rating=rating;found=true}})});
+  state.lists.forEach(L=>{(L.items||[]).forEach(it=>{if(it.url===url){it.rating=rating;found=true}})});
+  for(let i=state.history.length-1;i>=0;i--){if(state.history[i].url===url){state.history[i].rating=rating;found=true;break}}
+  if(found){saveState(state);renderAll();} else {alert('No se encontró el item en tu biblioteca. Añádelo primero.');}
+}
+
+function editItemInFolder(folderId,item){
+  const f = state.folders.find(x=>x.id===folderId);
+  const newTitle = prompt('Nuevo título',item.title||item.name)||item.title;
+  const newTags = prompt('Etiquetas (coma)',(item.tags||[]).join(','))||'';
+  item.title=newTitle; item.tags=newTags.split(',').map(s=>s.trim()).filter(Boolean);
+  saveState(state); renderAll();
+}
+
+function editItemInList(listId,item){
+  const L = state.lists.find(x=>x.id===listId);
+  const newTitle = prompt('Nuevo título',item.title||item.name)||item.title;
+  const newTags = prompt('Etiquetas (coma)',(item.tags||[]).join(','))||'';
+  item.title=newTitle; item.tags=newTags.split(',').map(s=>s.trim()).filter(Boolean);
+  saveState(state); renderAll();
+}
+
+function openList(listId){ const L = state.lists.find(x=>x.id===listId); if(!L) return; const count=(L.items||[]).length; if(count>5){ if(!confirm(`Se abrirán ${count} pestañas. ¿Confirmas?`)) return; } L.items.forEach(it=>safeOpen(it.url)) }
+function quickAddToList(item){
+  if(state.lists.length===0){alert('No tienes listas. Crea una primero.'); return}
+  openModal({
+    title:'Añadir recomendación a lista',
+    fields:[{name:'list',label:'Lista',type:'select',options:state.lists.map(L=>({label:L.name,value:L.id})),value:state.lists[0].id}],
+    submitText:'Añadir',
+    onSubmit:(data)=>{ const L = state.lists.find(x=>x.id===data.list); if(!L) return alert('Lista no encontrada'); if(existsInList(L.id,item.url)) return alert('La URL ya existe en esta lista'); L.items.push(Object.assign({id:uid('li')},item)); saveState(state); renderAll(); }
+  });
+}
+
+function debounce(fn, wait){ let t; return function(){ const args=arguments; clearTimeout(t); t=setTimeout(()=>fn.apply(this,args), wait); }; }
+function performGlobalSearch(termRaw){
+  const term = String(termRaw||'').trim().toLowerCase();
+  if(!term){ el.searchResults.innerHTML=''; el.searchCard.style.display='none'; el.searchTitle.textContent='Resultados de búsqueda'; return; }
+  const results = [];
+  state.folders.forEach(f=>{(f.items||[]).forEach(it=>{ const blob=((it.title||'')+ ' ' + (it.tags||[]).join(' ') + ' ' + (it.url||'')); if(blob.toLowerCase().includes(term)) results.push(it) })});
+  state.lists.forEach(L=>{(L.items||[]).forEach(it=>{ const blob=((it.title||'')+ ' ' + (it.tags||[]).join(' ') + ' ' + (it.url||'')); if(blob.toLowerCase().includes(term)) results.push(it) })});
+  state.quickLinks.forEach(q=>{ const blob=((q.name||'') + ' ' + (q.url||'')); if(blob.toLowerCase().includes(term)) results.push({title:q.name,url:q.url,tags:[]}) });
+  state.history.forEach(h=>{ const blob=((h.title||'') + ' ' + (h.tags||[]).join(' ') + ' ' + (h.url||'')); if(blob.toLowerCase().includes(term)) results.push({title:h.title,url:h.url,tags:h.tags||[]}) });
+  el.searchTitle.textContent = `Resultados de búsqueda (${results.length})`;
+  if(results.length===0){ el.searchResults.innerHTML='<div class="small muted">Sin coincidencias</div>'; el.searchCard.style.display='block'; return; }
+  renderSearchResults(results, term);
+  el.searchCard.style.display='block';
+}
+const debouncedSearch = debounce((val)=>performGlobalSearch(val), 250);
+document.getElementById('globalSearch').addEventListener('input', (e)=>{ debouncedSearch(e.target.value); });
+document.getElementById('globalSearch').addEventListener('keyup', (e)=>{ if(e.key==='Enter'){ performGlobalSearch(e.target.value); } });
+
+document.addEventListener('keydown', (e)=>{
+  const activeTag = document.activeElement && document.activeElement.tagName && document.activeElement.tagName.toLowerCase();
+  const typingInInput = activeTag==='input' || activeTag==='textarea';
+  if(e.key==='/' && !typingInInput){ e.preventDefault(); const gs=document.getElementById('globalSearch'); if(gs){ gs.focus(); } }
+  if(e.key==='Escape'){ const card = document.getElementById('searchCard'); if(card){ card.style.display='none'; } const res = document.getElementById('searchResults'); if(res){ res.innerHTML=''; } const title = document.getElementById('searchTitle'); if(title){ title.textContent='Resultados de búsqueda'; } }
+});
+
+document.getElementById('exportBtn').onclick = ()=>{
+  const data = localStorage.getItem(KEY)||JSON.stringify(stateDefault);
+  const blob = new Blob([data],{type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download='ccs_backup.json'; a.click(); URL.revokeObjectURL(url);
+}
+document.getElementById('importBtn').onclick = ()=>{ document.getElementById('hiddenFile').click(); }
+document.getElementById('hiddenFile').addEventListener('change', (ev)=>{
+  const f = ev.target.files[0]; if(!f) return;
+  const r = new FileReader(); r.onload = ()=>{ try{ const parsed = JSON.parse(r.result); localStorage.setItem(KEY, JSON.stringify(parsed)); location.reload(); }catch(e){alert('JSON inválido') } }
+  r.readAsText(f);
+})
+
+document.getElementById('mergeImportBtn').onclick = ()=>{ document.getElementById('hiddenFileMerge').click(); }
+document.getElementById('hiddenFileMerge').addEventListener('change', (ev)=>{
+  const f = ev.target.files[0]; if(!f) return;
+  const r = new FileReader(); r.onload = ()=>{ try{ const parsed = JSON.parse(r.result); const merged = mergeState(state, parsed); localStorage.setItem(KEY, JSON.stringify(merged)); location.reload(); }catch(e){alert('JSON inválido') } }
+  r.readAsText(f);
+})
+
+document.getElementById('clearHistory').onclick = ()=>{ if(!confirm('Borrar todo el historial?')) return; state.history=[]; saveState(state); renderAll(); }
+
+function escapeHTML(s){ return String(s||'').replace(/[&<>"']/g, c=> ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c])) }
+function renderStars(n){ let out=''; for(let i=1;i<=5;i++){out += `<span class='star ${i<=n? 'on':''}'>&#9733;</span>` } return out }
+function safeURL(u){ try{ const url = new URL(u); if(url.protocol==='http:'||url.protocol==='https:') return url.href; }catch(e){} return '#'; }
+function safeOpen(u){ const su = safeURL(u); if(su==='#'){ alert('URL insegura o inválida. Usa http(s).'); return; } window.open(su,'_blank'); }
+function mergeByUrl(arrA=[], arrB=[]){
+  const map = new Map();
+  arrA.forEach(it=>{ if(it && it.url){ map.set(it.url, it); } });
+  arrB.forEach(it=>{ if(it && it.url){ if(!map.has(it.url)) { map.set(it.url, it); } else {
+    const cur=map.get(it.url);
+    const tags = Array.from(new Set([...(cur.tags||[]), ...(it.tags||[])]));
+    const rating = Math.max(cur.rating||0, it.rating||0) || undefined;
+    const watched = cur.watched || it.watched || false;
+    map.set(it.url, Object.assign({}, cur, it, {tags, rating, watched}));
+  } } });
+  return Array.from(map.values());
+}
+function mergeState(curr, incoming){
+  const out = ensurePrefs(structuredClone(curr));
+  const inc = ensurePrefs(structuredClone(incoming||{}));
+  out.quickLinks = mergeByUrl(out.quickLinks, inc.quickLinks);
+  const byName = new Map();
+  (out.folders||[]).forEach(f=>byName.set(f.name, f));
+  (inc.folders||[]).forEach(f=>{
+    if(byName.has(f.name)){
+      const cur = byName.get(f.name);
+      cur.items = mergeByUrl(cur.items||[], f.items||[]);
+    } else {
+      byName.set(f.name, f);
+    }
+  });
+  out.folders = Array.from(byName.values());
+  const byList = new Map();
+  (out.lists||[]).forEach(L=>byList.set(L.name, L));
+  (inc.lists||[]).forEach(L=>{
+    if(byList.has(L.name)){
+      const cur = byList.get(L.name);
+      cur.items = mergeByUrl(cur.items||[], L.items||[]);
+    } else {
+      byList.set(L.name, L);
+    }
+  });
+  out.lists = Array.from(byList.values());
+  const hist = [...(out.history||[]), ...(inc.history||[])];
+  const seen = new Set();
+  out.history = hist.filter(h=>{
+    const key = h.id || (h.url+'@'+(h.ts||0)); if(seen.has(key)) return false; seen.add(key); return true;
+  });
+  out.prefs = ensurePrefs(Object.assign({}, inc.prefs, out.prefs));
+  return out;
+}
+function getAllTags(){
+  const set = new Set();
+  state.folders.forEach(f=>{(f.items||[]).forEach(it=>{(it.tags||[]).forEach(t=>set.add(t))})});
+  state.lists.forEach(L=>{(L.items||[]).forEach(it=>{(it.tags||[]).forEach(t=>set.add(t))})});
+  state.history.forEach(h=>{(h.tags||[]).forEach(t=>set.add(t))});
+  return Array.from(set);
+}
+function renderSearchResults(results, term){
+  el.searchResults.innerHTML='';
+  const re = term? new RegExp(`(${String(term).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`,'ig') : null;
+  const hl = (s)=>{ const safe = escapeHTML(s||''); return re? safe.replace(re,'<mark>$1</mark>') : safe; };
+  results.forEach(it=>{
+    const row=document.createElement('div'); row.className='item-row';
+    const titleRaw = it.title||it.name||it.url||'';
+    const urlRaw = it.url||'';
+    const tagsRaw = (it.tags||[]).join(', ');
+    row.innerHTML = `<div><a href='${safeURL(urlRaw)}' target='_blank' rel='noopener noreferrer'>${hl(titleRaw)}</a><div class='meta'>${hl(urlRaw)} • ${hl(tagsRaw)}</div></div><div style='display:flex;gap:6px;align-items:center'><div class='stars' data-url='${encodeURIComponent(urlRaw)}'>${renderStars(it.rating||0)}</div><button class='small-btn' data-action='mark'>Visto</button></div>`;
+    el.searchResults.appendChild(row);
+    row.querySelector("[data-action='mark']").onclick = ()=>markWatched(it);
+    row.querySelector('.stars').querySelectorAll('.star').forEach((s,idx)=>{ s.onclick = ()=>{ setRating(it.url, idx+1); } });
+  });
+  el.searchCard.style.display='block';
+}
+document.getElementById('clearSearch').onclick = ()=>{ el.searchResults.innerHTML=''; el.searchCard.style.display='none'; document.getElementById('globalSearch').value=''; el.searchTitle.textContent='Resultados de búsqueda'; document.getElementById('globalSearch').focus(); }
+
+function updateStorageUsage(){
+  try{
+    const used = new Blob([localStorage.getItem(KEY)||'']).size;
+    const elStorage = document.getElementById('storageUsage');
+    if(elStorage){ elStorage.textContent = Math.round(used/1024)+' KB'; }
+  }catch(e){
+    const elStorage = document.getElementById('storageUsage');
+    if(elStorage){ elStorage.textContent='—'; }
+  }
+}
+
+function existsInFolder(folderId,url){ const f = state.folders.find(x=>x.id===folderId); return !!(f && (f.items||[]).some(it=>it.url===url)); }
+function existsInList(listId,url){ const L = state.lists.find(x=>x.id===listId); return !!(L && (L.items||[]).some(it=>it.url===url)); }
+function existsQuick(url){ return (state.quickLinks||[]).some(q=>q.url===url); }
+
+function openModal(opts){
+  el.modalTitle.textContent = opts.title||'Formulario';
+  el.modalBody.innerHTML = '';
+  const fieldEls = {};
+  (opts.fields||[]).forEach(f=>{
+    const wrap=document.createElement('div'); wrap.className='field';
+    const label=document.createElement('label'); label.textContent=f.label||f.name; wrap.appendChild(label);
+    if(f.type==='tags'){
+      const chips=document.createElement('div'); chips.className='chips';
+      const input=document.createElement('input'); input.type='text'; input.placeholder='Añadir etiqueta y Enter';
+      const suggest=document.createElement('div'); suggest.className='chips';
+      const tags = Array.isArray(f.value)? f.value.slice():[];
+      function render(){ chips.innerHTML=''; tags.forEach(t=>{ const c=document.createElement('span'); c.className='chip'; c.innerHTML = `${escapeHTML(t)} <button aria-label='Eliminar'>&times;</button>`; c.querySelector('button').onclick = ()=>{ const i=tags.indexOf(t); if(i>-1){tags.splice(i,1); render();} }; chips.appendChild(c); }); }
+      function addTag(val){ const v=String(val||'').trim(); if(v && !tags.includes(v)){ tags.push(v); render(); } }
+      function renderSuggestions(prefix){
+        const all = getAllTags(); const p = String(prefix||'').trim().toLowerCase();
+        const pop = getTagPopularity();
+        const list = all.filter(t=>!tags.includes(t) && (!p || t.toLowerCase().includes(p))).sort((a,b)=> (pop.get(b)||0)-(pop.get(a)||0) || a.localeCompare(b)).slice(0,10);
+        suggest.innerHTML='';
+        if(list.length>0){ list.forEach(t=>{ const c=document.createElement('span'); c.className='chip'; c.textContent = t; c.onclick = ()=>{ addTag(t); input.value=''; renderSuggestions(''); }; suggest.appendChild(c); }); } else { const note=document.createElement('span'); note.className='small muted'; note.textContent='Sin sugerencias'; suggest.appendChild(note); }
+      }
+      input.addEventListener('input',(e)=>{ renderSuggestions(e.target.value); });
+      input.addEventListener('keydown',(e)=>{ if(e.key==='Enter' || e.key===','){ e.preventDefault(); addTag(input.value); input.value=''; renderSuggestions(''); } });
+      render(); renderSuggestions('');
+      wrap.appendChild(chips); wrap.appendChild(input); wrap.appendChild(suggest);
+      fieldEls[f.name] = {get:()=>tags};
+    } else if(f.type==='select'){
+      const sel=document.createElement('select'); (f.options||[]).forEach(opt=>{ const o=document.createElement('option'); o.value=opt.value; o.textContent=opt.label; sel.appendChild(o); }); if(f.value) sel.value=f.value; wrap.appendChild(sel); fieldEls[f.name]={get:()=>sel.value};
+    } else {
+      const inp=document.createElement('input'); inp.type=f.type||'text'; inp.value=f.value||''; wrap.appendChild(inp); fieldEls[f.name]={get:()=>inp.value};
+    }
+    el.modalBody.appendChild(wrap);
+  });
+  el.modalOverlay.style.display='flex';
+  const firstInput = el.modalBody.querySelector('input,select'); if(firstInput) firstInput.focus();
+  function close(){ el.modalOverlay.style.display='none'; el.modalBody.innerHTML=''; }
+  el.modalSubmit.textContent = opts.submitText||'Guardar';
+  const submitHandler = ()=>{ const data={}; Object.keys(fieldEls).forEach(k=>{ data[k]=fieldEls[k].get(); }); close(); try{ opts.onSubmit && opts.onSubmit(data); }catch(e){ console.error(e); alert('Error al procesar el formulario'); } };
+  const cancelHandler = ()=>{ close(); };
+  el.modalSubmit.onclick = submitHandler;
+  el.modalCancel.onclick = cancelHandler;
+  el.modalOverlay.onclick = (e)=>{ if(e.target===el.modalOverlay) close(); };
+}
+
+function editHistoryEntry(h){
+  openModal({
+    title:'Editar historial',
+    fields:[
+      {name:'title',label:'Título',type:'text',value:(h.title||'')},
+      {name:'tags',label:'Etiquetas',type:'tags',value:(h.tags||[])},
+      {name:'rating',label:'Valoración (1-5)',type:'number',value:(h.rating||'')}
+    ],
+    submitText:'Guardar',
+    onSubmit:(data)=>{
+      const ratingVal = data.rating? Number(data.rating): undefined;
+      if(ratingVal && (ratingVal<1 || ratingVal>5)) return alert('La valoración debe ser entre 1 y 5');
+      h.title = data.title||h.title; h.tags = data.tags||[]; h.rating = ratingVal;
+      saveState(state); renderAll();
+    }
+  });
+}
+function deleteHistoryEntry(id){
+  if(!confirm('Eliminar entrada de historial?')) return;
+  state.history = state.history.filter(x=>x.id!==id);
+  saveState(state); renderAll();
+}
+
+if((state.folders||[]).length===0){
+  state.folders = [ {id:uid('f'),name:'Películas',items:[{id:uid('b'),title:'The Matrix',url:'https://www.imdb.com/title/tt0133093/',tags:['sci-fi','accion'],rating:5}]},
+    {id:uid('f'),name:'Series',items:[{id:uid('b'),title:'Stranger Things',url:'https://www.netflix.com/title/80057281',tags:['drama','sci-fi']}]}
+  ]; saveState(state); renderAll();
+}
+
+document.addEventListener('keydown',(e)=>{
+  if(e.key==='/' && document.activeElement.tagName!=='INPUT') { e.preventDefault(); document.getElementById('globalSearch').focus(); }
+  if(e.key==='r' && (e.ctrlKey||e.metaKey)){ e.preventDefault(); renderAll(); alert('Interfaz actualizada') }
+})
